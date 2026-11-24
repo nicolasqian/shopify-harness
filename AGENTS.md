@@ -11,10 +11,10 @@ This file defines how AI coding agents should behave in this repository.
 
 ## Scope
 
-- This repository is a Shopify theme codebase for EcoFlow US.
+- This repository is an EcoFlow Shopify theme codebase.
 - Respect the existing theme structure: `sections/`, `snippets/`, `assets/`, `templates/`, `blocks/`, `config/`, `layout/`, `locales/`.
 - Follow existing implementation patterns before introducing new abstractions.
-- For component development, template lookup, or cross-store section migration, read [Project map](docs/project-map.md) for code entry points and dependency lookup; follow linked skills only when relevant to the task.
+- For component development, template lookup, or cross-store section migration, read `docs/project-map.md` when present in the theme repository for code entry points and dependency lookup (otherwise inspect `layout/`, `templates/`, `sections/`, `snippets/`, and `assets/` directly); follow linked skills only when relevant to the task.
 
 ## Everyday Shopify Changes
 
@@ -92,6 +92,7 @@ This file defines how AI coding agents should behave in this repository.
 ## Verification Rules
 
 - After code changes, run the smallest useful verification available.
+- Run `python3 .agents/scripts/verify-changes.py` after theme edits to validate changed JSON syntax, guard protected tracking files, and run repository `tests/` when present (pass `--theme-check` when targeted Liquid linting is needed).
 - For UI changes, verify the affected behavior using the preview rules above and report its verification status.
 - If verification could not be completed, say exactly what was not verified and why.
 - Do not claim success without verification evidence.

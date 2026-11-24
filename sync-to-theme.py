@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""按清单同步 EcoFlow US 的 harness 文件。"""
+"""按清单同步 EcoFlow Shopify 主题的共享 harness 文件。"""
 import argparse
 import fcntl
 import hashlib
@@ -95,7 +95,7 @@ def sync(theme, dry_run):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("theme", type=Path, help="ecoflow-tech 主题仓库根目录")
+    parser.add_argument("theme", type=Path, help="目标 Shopify 主题仓库根目录")
     parser.add_argument("--dry-run", action="store_true", help="仅检查并列出变化")
     args = parser.parse_args()
     theme = args.theme.resolve()
