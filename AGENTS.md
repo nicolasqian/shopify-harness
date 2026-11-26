@@ -59,6 +59,7 @@ This file defines how AI coding agents should behave in this repository.
 - For frontend behavior, prefer the repo's existing Alpine.js approach when interaction is needed.
 - For styling, preserve the existing visual system unless the user asks for a redesign.
 - Avoid adding dependencies unless they are necessary and approved.
+- Do not introduce new `{% stylesheet %}` blocks in Liquid files (any single `{% stylesheet %}` causes Shopify to emit a global render-blocking `compiled_assets/styles.css` + HTTP 103 Early Hint site-wide); use per-component `assets/*.css` (synchronous when `request.design_mode` or `section.index <= 2`, async `media="print" onload` below the fold) or inline `<style>` for small single-instance sections.
 
 ## Performance Optimization Workflow
 
@@ -92,7 +93,7 @@ This file defines how AI coding agents should behave in this repository.
 ## Verification Rules
 
 - After code changes, run the smallest useful verification available.
-- Run `python3 .agents/scripts/verify-changes.py` after theme edits to validate changed JSON syntax, guard protected tracking files, and run repository `tests/` when present (pass `--theme-check` when targeted Liquid linting is needed).
+- Run `python3 .agents/scripts/verify-changes.py` after theme edits to validate changed JSON syntax, guard protected tracking files, block newly added `{% stylesheet %}` tags, and run repository `tests/` when present (pass `--theme-check` when targeted Liquid linting is needed).
 - For UI changes, verify the affected behavior using the preview rules above and report its verification status.
 - If verification could not be completed, say exactly what was not verified and why.
 - Do not claim success without verification evidence.

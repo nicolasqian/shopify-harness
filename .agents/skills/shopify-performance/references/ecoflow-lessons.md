@@ -83,6 +83,14 @@
 - UK M10 的多轮定向 Theme Check 使用了不同文件和依赖集合，问题数量随范围变化。缺失 locale、asset 或模板引起的隔离环境提示，应与真实源文件既有问题分开；相同依赖集合中的新增为零，只证明未检出新增问题，不代表检查退出码为零。
 - 有文件保留 CRLF；必要时使用 `git -c core.whitespace=cr-at-eol diff --check`，不要为通过检查批量格式化。`docs` 被 Git 忽略，报告没有进入 git status 不代表没保存。
 
+## 全站阻塞样式拆解与 2026-11 黑五专项
+
+- Shopify 会把**`sections/` 与 `snippets/` 两类目录中的全部 `{% stylesheet %}`** 合并生成全局渲染阻塞的 `compiled_assets/styles.css` 与 HTTP `103 Early Hints`；只要全仓残留 1 处就不会消除，彻底清零后全站才会释放阻塞。拆解时须审计未加作用域的全局规则泄漏（如 `product-card-carousel` 覆盖规则实际被首页 `hp-senario-cards` 消费），并前置补齐至 `assets/theme.css` 与移动端首屏内联/优先样式（如 `assets/home-first-paint.css`）。
+- `{% render 'snippet' %}` 会隔离父级 `section` 上下文：切勿在 snippet 内部直接写 `section.index` 判断首屏同步加载，必须由调用方显式传入 `section_index: section.index`（已在 `/pages/subscribe` 的 `custom-modal-section-assets.liquid` 验证）。
+- 原 `{% stylesheet %}` 中含相对路径 `url(../assets/...)` 的规则，迁移为外链 `assets/*.css` 时与原编译包处于同级路径可正常解析；若改为内联 `<style>` 则会按页面路径解析导致图片 404，含相对 `url(...)` 的样式必须外链化。
+- 判断 `section.index` 的首屏同步条件时，避免把 `or` 和 `and` 混写在同一行，统一使用 `{%- liquid -%}` 显式赋值布尔变量（Liquid 按从右向左结合求值）。
+- Shopify 预览模式（`preview_theme_id` / preview cookie）会额外增加约 `54–93 KB` HTML 传输体积、注入 Preview Bar（推高 TBT），且 Cloudflare 边缘 `103 Early Hints` 仍按线上正式主题缓存。预览链接仅适合验证功能、DOM、请求消除，真实 FCP / LCP / TBT 收益须在发布后的正式 URL 复测确认。
+
 ## 留下可接续的结论
 
 用四种状态表达结果：直接收益与功能通过；直接收益通过但整体指标未证实；候选无效/回退已撤回；受权限或业务确认阻碍。让下一轮知道该改哪个代码点、哪个假设已失败，以及需要什么证据才能重试。避免只留下大量 raw 文件和“尚未完成”。

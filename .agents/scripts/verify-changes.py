@@ -14,6 +14,8 @@ LEADING_BLOCK_COMMENT = re.compile(r"^\s*(?:/\*.*?\*/\s*)+", re.S)
 PROTECTED_PATTERNS = (
     re.compile(r"(^|/)snippets/dataLayer[^/]*\.liquid$", re.I),
 )
+STYLESHEET_TAG_RE = re.compile(r"\{%-?\s*stylesheet\s*-?%\}")
+STYLESHEET_LIQUID_DIRS = ("sections/", "snippets/", "blocks/", "layout/")
 
 
 def repo_root(cwd: Path) -> Path:
@@ -40,6 +42,61 @@ def changed_files(root: Path, staged_only: bool) -> list[str]:
             if item:
                 paths.add(item)
     return sorted(paths)
+
+
+def is_tracked(root: Path, rel: str) -> bool:
+    proc = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "--error-unmatch", "--", rel],
+        capture_output=True,
+    )
+    return proc.returncode == 0
+
+
+def added_diff_lines(root: Path, rel: str, staged_only: bool) -> list[str]:
+    cmds = [["git", "-C", str(root), "diff", "--cached", "-U0", "--", rel]]
+    if not staged_only:
+        cmds.append(["git", "-C", str(root), "diff", "-U0", "--", rel])
+    lines: list[str] = []
+    for cmd in cmds:
+        out = subprocess.check_output(cmd)
+        for line in out.decode("utf-8", errors="replace").splitlines():
+            if line.startswith("+") and not line.startswith("+++"):
+                lines.append(line[1:])
+    return lines
+
+
+def check_stylesheet_tags(
+    root: Path,
+    files: list[str],
+    allow_stylesheet: bool,
+    staged_only: bool,
+    explicit_files: bool,
+) -> tuple[int, list[str]]:
+    liquid_files = [
+        f
+        for f in files
+        if f.endswith(".liquid") and f.startswith(STYLESHEET_LIQUID_DIRS) and (root / f).is_file()
+    ]
+    hits: list[str] = []
+    for rel in liquid_files:
+        if explicit_files or not is_tracked(root, rel):
+            content = (root / rel).read_text(encoding="utf-8", errors="replace")
+            if STYLESHEET_TAG_RE.search(content):
+                hits.append(rel)
+        else:
+            for line in added_diff_lines(root, rel, staged_only):
+                if STYLESHEET_TAG_RE.search(line):
+                    hits.append(rel)
+                    break
+    if not hits:
+        return len(liquid_files), []
+    if allow_stylesheet:
+        print(f"[WARN] {{% stylesheet %}} tag found (allowed by flag): {', '.join(hits)}")
+        return len(liquid_files), []
+    return len(liquid_files), [
+        f"{{% stylesheet %}} tag introduced in {f}; Shopify compiles any {{% stylesheet %}} into global render-blocking compiled_assets/styles.css + 103 Early Hint. Use assets/*.css with conditional sync/async <link> or inline <style> instead (pass --allow-stylesheet to override)."
+        for f in hits
+    ]
 
 
 def check_protected(files: list[str], allow_protected: bool) -> list[str]:
@@ -116,6 +173,7 @@ def main() -> int:
     parser.add_argument("--skip-tests", action="store_true", help="Skip running tests/*.test.*")
     parser.add_argument("--theme-check", action="store_true", help="Run targeted shopify theme check on changed .liquid files")
     parser.add_argument("--allow-protected", action="store_true", help="Allow edits to protected tracking files (dataLayer*.liquid)")
+    parser.add_argument("--allow-stylesheet", action="store_true", help="Allow newly added {% stylesheet %} blocks in Liquid files")
     args = parser.parse_args()
 
     try:
@@ -130,6 +188,10 @@ def main() -> int:
     errors.extend(check_protected(files, args.allow_protected))
     json_count, json_errors = check_json_files(root, files)
     errors.extend(json_errors)
+    stylesheet_checked, stylesheet_errors = check_stylesheet_tags(
+        root, files, args.allow_stylesheet, args.staged, bool(args.files)
+    )
+    errors.extend(stylesheet_errors)
 
     test_count = 0
     if not args.skip_tests:
@@ -143,7 +205,7 @@ def main() -> int:
 
     print(
         f"Checked {len(files)} file(s): "
-        f"json={json_count}, tests={test_count}, theme-check-liquid={liquid_checked}"
+        f"json={json_count}, stylesheet-guard={stylesheet_checked}, tests={test_count}, theme-check-liquid={liquid_checked}"
     )
     if errors:
         for err in errors:
