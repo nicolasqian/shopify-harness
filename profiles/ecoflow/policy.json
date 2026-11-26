@@ -1,0 +1,4 @@
+{
+  "protected_paths": ["snippets/dataLayer*.liquid"],
+  "forbid_new_stylesheet": true
+}

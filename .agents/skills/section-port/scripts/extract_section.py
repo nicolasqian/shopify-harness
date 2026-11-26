@@ -11,39 +11,36 @@ import re
 import sys
 from pathlib import Path
 
-FALLBACK_EDITOR_NAME_TO_TYPES = {
-    "pdp rich text": ["pdp-rich-text"],
-    "pdp text with image": ["pdp-text-with-image", "pdp-text-with-image-2"],
-    "pdp slideshow": ["pdp-slideshow", "pdp-slideshow-new", "pdp-slideshow-alter"],
-}
+# This helper and the verifier ship with the same Shopify JSON reader.
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
+import theme_json
 
 SCHEMA_RE = re.compile(r"\{%-?\s*schema\s*-?%\}(.*?)\{%-?\s*endschema\s*-?%\}", re.S)
-LEADING_COMMENT_RE = re.compile(r"^\s*(?:/\*.*?\*/\s*)+", re.S)
 
 
-def load_template(path: Path) -> dict:
-    text = path.read_text(encoding="utf-8")
-    text = LEADING_COMMENT_RE.sub("", text, count=1)
-    return json.loads(text)
+def read_object(path: Path) -> dict:
+    try:
+        value = theme_json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            raise ValueError("expected a JSON object")
+        return value
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"{path}: {exc}") from exc
 
 
 def find_theme_root(template_path: Path) -> Path | None:
-    resolved = template_path.resolve()
-    for parent in resolved.parents:
+    for parent in template_path.resolve().parents:
         if (parent / "sections").is_dir():
             return parent
     return None
 
 
 def load_schema_locales(theme_root: Path) -> dict:
-    for rel in ("locales/en.default.schema.json", "locales/en.default.json"):
-        locale_path = theme_root / rel
-        if locale_path.is_file():
-            try:
-                raw = locale_path.read_text(encoding="utf-8")
-                return json.loads(LEADING_COMMENT_RE.sub("", raw, count=1))
-            except Exception:
-                continue
+    locales_dir = theme_root / "locales"
+    for pattern in ("*.default.schema.json", "*.default.json"):
+        for path in sorted(locales_dir.glob(pattern)):
+            return read_object(path)
     return {}
 
 
@@ -59,66 +56,40 @@ def resolve_translation(value: str, locales: dict) -> str:
     return cur if isinstance(cur, str) else value
 
 
-def discover_editor_name_map(theme_root: Path | None) -> dict[str, list[str]]:
-    if theme_root is None:
-        return {}
-    sections_dir = theme_root / "sections"
-    if not sections_dir.is_dir():
-        return {}
-    locales = load_schema_locales(theme_root)
-    mapping: dict[str, list[str]] = {}
-    for liquid_file in sorted(sections_dir.glob("*.liquid")):
-        try:
-            text = liquid_file.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            continue
-        match = SCHEMA_RE.search(text)
-        if not match:
-            continue
-        try:
-            schema = json.loads(match.group(1))
-        except Exception:
-            continue
-        raw_name = schema.get("name")
-        if not isinstance(raw_name, str) or not raw_name.strip():
-            continue
-        resolved_name = resolve_translation(raw_name.strip(), locales).strip().lower()
-        mapping.setdefault(resolved_name, []).append(liquid_file.stem)
-        if raw_name.strip().lower() != resolved_name:
-            mapping.setdefault(raw_name.strip().lower(), []).append(liquid_file.stem)
-    for key, types in mapping.items():
-        unique = sorted(set(types), key=lambda s: (len(s), s))
-        mapping[key] = unique
-    return mapping
+def profile_types(label, include_variants):
+    aliases_path = Path(__file__).resolve().parents[1] / "section-aliases.json"
+    aliases = read_object(aliases_path).get(label.strip().casefold(), []) if aliases_path.is_file() else []
+    if not isinstance(aliases, list) or not all(isinstance(a, str) for a in aliases):
+        raise ValueError(f"{aliases_path}: expected a list of types for {label!r}")
+    return aliases if include_variants else aliases[:1]
 
 
-def types_for(
-    editor_name: str | None,
-    section_type: str | None,
-    source_only: bool,
-    theme_root: Path | None,
-) -> list[str]:
-    if section_type:
-        return [section_type]
-    if not editor_name:
-        raise SystemExit("Provide --editor-name or --type")
-    key = editor_name.strip().lower()
-    discovered = discover_editor_name_map(theme_root)
-    merged: list[str] = []
-    for candidate in (*discovered.get(key, []), *FALLBACK_EDITOR_NAME_TO_TYPES.get(key, [])):
-        if candidate not in merged:
-            merged.append(candidate)
-    types = merged
-    if not types:
-        sample = sorted(discovered.keys())[:10] if discovered else sorted(FALLBACK_EDITOR_NAME_TO_TYPES.keys())
-        raise SystemExit(
-            f"Unknown editor name: {editor_name!r}. "
-            f"Use --type or verify section schema name. Sample known names: {sample}"
-        )
-    # Source templates usually use the canonical type without -2/-new/-alter.
-    if source_only:
-        return [types[0]]
-    return types
+def matched_by_label(data, root, label):
+    key = label.strip().casefold()
+    sections = data.get("sections", {})
+    locales = load_schema_locales(root) if root else {}
+    matching_types = set()
+    ids = []
+    checked = set()
+    for sid in data.get("order", []):
+        section = sections[sid]
+        kind = section["type"]
+        if root and kind not in checked and Path(kind).name == kind:
+            checked.add(kind)
+            path = root / "sections" / (kind + ".liquid")
+            if path.is_file():
+                match = SCHEMA_RE.search(path.read_text(encoding="utf-8"))
+                if match:
+                    try:
+                        schema = theme_json.loads(match.group(1))
+                        name = schema["name"]
+                        if key in (name.strip().casefold(), resolve_translation(name, locales).strip().casefold()):
+                            matching_types.add(kind)
+                    except (KeyError, AttributeError, TypeError, ValueError) as exc:
+                        print(f"[WARN] {path}: {exc}", file=sys.stderr)
+        if kind in matching_types or str(section.get("name", "")).strip().casefold() == key:
+            ids.append(sid)
+    return ids
 
 
 def clue(section: dict) -> str:
@@ -165,17 +136,22 @@ def main() -> int:
     parser.add_argument(
         "--include-variants",
         action="store_true",
-        help="Also match type variants (-2, -new, -alter). Default: canonical source type only.",
+        help="Include additional type aliases supplied by the installed theme profile.",
     )
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--nth", type=int, help="1-based index including disabled")
     parser.add_argument("--dump", action="store_true", help="Print the nth section JSON")
     args = parser.parse_args()
 
-    theme_root = find_theme_root(args.template)
-    types = types_for(args.editor_name, args.type, source_only=not args.include_variants, theme_root=theme_root)
-    data = load_template(args.template)
-    ids = matched_ids(data, types)
+    if not (args.editor_name or args.type):
+        parser.error("provide --editor-name or --type")
+    data = read_object(args.template)
+    types = [args.type] if args.type else profile_types(args.editor_name, args.include_variants)
+    if types:
+        ids = matched_ids(data, types)
+    else:
+        ids = matched_by_label(data, find_theme_root(args.template), args.editor_name)
+        types = list(dict.fromkeys(data["sections"][sid]["type"] for sid in ids))
 
     if args.list or args.nth is None:
         print(f"type={types} count={len(ids)}")
@@ -183,8 +159,6 @@ def main() -> int:
             sec = data["sections"][sid]
             flag = " disabled" if sec.get("disabled") else ""
             print(f"{i}. {sid} ({sec.get('type')}){flag} | {clue(sec)}")
-        if args.nth is None and not args.dump:
-            return 0
 
     if args.nth is None:
         return 0
@@ -208,4 +182,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except (OSError, ValueError) as error:
+        sys.exit(str(error))

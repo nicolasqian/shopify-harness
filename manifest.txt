@@ -1,8 +1,8 @@
+.agents/shopify-harness.md
+.agents/scripts/theme_json.py
 .agents/scripts/verify-changes.py
 .agents/skills/section-port/SKILL.md
 .agents/skills/section-port/scripts/extract_section.py
 .agents/skills/shopify-commit-message/SKILL.md
 .agents/skills/shopify-performance/SKILL.md
-.agents/skills/shopify-performance/references/ecoflow-lessons.md
-AGENTS.md
-CLAUDE.md
+.agents/skills/shopify-performance/references/measurement.md

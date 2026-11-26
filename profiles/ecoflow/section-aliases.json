@@ -1,0 +1,5 @@
+{
+  "pdp rich text": ["pdp-rich-text"],
+  "pdp text with image": ["pdp-text-with-image", "pdp-text-with-image-2"],
+  "pdp slideshow": ["pdp-slideshow", "pdp-slideshow-new", "pdp-slideshow-alter"]
+}

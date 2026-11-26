@@ -1,0 +1,5 @@
+AGENTS.md => profiles/ecoflow/AGENTS.md
+CLAUDE.md
+.agents/shopify-harness-policy.json => profiles/ecoflow/policy.json
+.agents/skills/section-port/section-aliases.json => profiles/ecoflow/section-aliases.json
+.agents/skills/shopify-performance/references/ecoflow-lessons.md => profiles/ecoflow/ecoflow-lessons.md

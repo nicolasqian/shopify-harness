@@ -1,218 +1,245 @@
 #!/usr/bin/env python3
-"""Run lightweight, diff-scoped verification checks for Shopify theme edits."""
+"""Verify Shopify theme edits in the working tree or staged snapshot."""
 from __future__ import annotations
 
 import argparse
+from collections import Counter
+from contextlib import contextmanager
+from fnmatch import fnmatchcase
 import json
+import os
+from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
-from pathlib import Path
+import tempfile
 
-LEADING_BLOCK_COMMENT = re.compile(r"^\s*(?:/\*.*?\*/\s*)+", re.S)
-PROTECTED_PATTERNS = (
-    re.compile(r"(^|/)snippets/dataLayer[^/]*\.liquid$", re.I),
-)
-STYLESHEET_TAG_RE = re.compile(r"\{%-?\s*stylesheet\s*-?%\}")
-STYLESHEET_LIQUID_DIRS = ("sections/", "snippets/", "blocks/", "layout/")
+sys.dont_write_bytecode = True
+import theme_json
 
-
-def repo_root(cwd: Path) -> Path:
-    out = subprocess.check_output(
-        ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
-        text=True,
-    ).strip()
-    return Path(out).resolve()
+POLICY = ".agents/shopify-harness-policy.json"
+THEME_DIRS = ("assets/", "blocks/", "config/", "layout/", "locales/", "sections/", "snippets/", "templates/")
+JSONC_DIRS = ("config/", "locales/", "sections/", "templates/")
+STYLESHEET_DIRS = ("sections/", "snippets/", "blocks/", "layout/")
+STYLESHEET = re.compile(r"\{%-?\s*stylesheet\s*-?%\}")
+TEST_NAME = re.compile(r"^tests/[^/]+\.test\.(c|m)?js$")
 
 
-def changed_files(root: Path, staged_only: bool) -> list[str]:
-    paths: set[str] = set()
-    if staged_only:
-        cmds = [["git", "-C", str(root), "diff", "--cached", "--name-only", "-z", "--diff-filter=ACMR"]]
-    else:
-        cmds = [
-            ["git", "-C", str(root), "diff", "--cached", "--name-only", "-z", "--diff-filter=ACMR"],
-            ["git", "-C", str(root), "diff", "--name-only", "-z", "--diff-filter=ACMR"],
-            ["git", "-C", str(root), "ls-files", "--others", "--exclude-standard", "-z"],
-        ]
-    for cmd in cmds:
-        out = subprocess.check_output(cmd)
-        for item in out.decode("utf-8", errors="surrogateescape").split("\0"):
-            if item:
-                paths.add(item)
-    return sorted(paths)
+def git_paths(root, *args):
+    data = subprocess.check_output(["git", *args], cwd=root)
+    return {os.fsdecode(item) for item in data.split(b"\0") if item}
 
 
-def is_tracked(root: Path, rel: str) -> bool:
-    proc = subprocess.run(
-        ["git", "-C", str(root), "ls-files", "--error-unmatch", "--", rel],
-        capture_output=True,
-    )
-    return proc.returncode == 0
+def changed_files(root, staged, base):
+    # Detect renames as deletion + addition so both paths reach the protection check.
+    diff = ["diff", "--no-renames", "--name-only", "-z"]
+    if base:
+        paths = git_paths(root, *diff, base, "--")
+        return paths | git_paths(root, "ls-files", "--others", "--exclude-standard", "-z")
+    paths = git_paths(root, *diff, "--cached")
+    if not staged:
+        paths.update(git_paths(root, *diff))
+        paths.update(git_paths(root, "ls-files", "--others", "--exclude-standard", "-z"))
+    return paths
 
 
-def added_diff_lines(root: Path, rel: str, staged_only: bool) -> list[str]:
-    cmds = [["git", "-C", str(root), "diff", "--cached", "-U0", "--", rel]]
-    if not staged_only:
-        cmds.append(["git", "-C", str(root), "diff", "-U0", "--", rel])
-    lines: list[str] = []
-    for cmd in cmds:
-        out = subprocess.check_output(cmd)
-        for line in out.decode("utf-8", errors="replace").splitlines():
-            if line.startswith("+") and not line.startswith("+++"):
-                lines.append(line[1:])
-    return lines
-
-
-def check_stylesheet_tags(
-    root: Path,
-    files: list[str],
-    allow_stylesheet: bool,
-    staged_only: bool,
-    explicit_files: bool,
-) -> tuple[int, list[str]]:
-    liquid_files = [
-        f
-        for f in files
-        if f.endswith(".liquid") and f.startswith(STYLESHEET_LIQUID_DIRS) and (root / f).is_file()
-    ]
-    hits: list[str] = []
-    for rel in liquid_files:
-        if explicit_files or not is_tracked(root, rel):
-            content = (root / rel).read_text(encoding="utf-8", errors="replace")
-            if STYLESHEET_TAG_RE.search(content):
-                hits.append(rel)
+@contextmanager
+def check_tree(root, files, args):
+    if not args.staged:
+        yield root
+        return
+    tracked = git_paths(root, "ls-files", "--cached", "-z")
+    needs_context = args.theme_check or (not args.skip_tests and any(TEST_NAME.match(f) for f in tracked))
+    with tempfile.TemporaryDirectory(prefix="shopify-harness-index-") as directory:
+        tree = Path(directory).resolve()
+        cmd = ["git", "checkout-index", "--ignore-skip-worktree-bits", "--prefix=" + str(tree) + "/"]
+        if needs_context:
+            subprocess.run([*cmd, "--all"], cwd=root, check=True)
+            deps = root / "node_modules"
+            if deps.is_dir() and not (tree / "node_modules").exists():
+                (tree / "node_modules").symlink_to(deps, target_is_directory=True)
         else:
-            for line in added_diff_lines(root, rel, staged_only):
-                if STYLESHEET_TAG_RE.search(line):
-                    hits.append(rel)
-                    break
-    if not hits:
-        return len(liquid_files), []
-    if allow_stylesheet:
-        print(f"[WARN] {{% stylesheet %}} tag found (allowed by flag): {', '.join(hits)}")
-        return len(liquid_files), []
-    return len(liquid_files), [
-        f"{{% stylesheet %}} tag introduced in {f}; Shopify compiles any {{% stylesheet %}} into global render-blocking compiled_assets/styles.css + 103 Early Hint. Use assets/*.css with conditional sync/async <link> or inline <style> instead (pass --allow-stylesheet to override)."
-        for f in hits
-    ]
+            paths = tracked.intersection(files | {POLICY})
+            data = b"".join(os.fsencode(p) + b"\0" for p in sorted(paths))
+            subprocess.run([*cmd, "-z", "--stdin"], cwd=root, input=data, check=True)
+        yield tree
 
 
-def check_protected(files: list[str], allow_protected: bool) -> list[str]:
-    hits = [f for f in files if any(p.search(f) for p in PROTECTED_PATTERNS)]
-    if not hits:
-        return []
-    if allow_protected:
-        print(f"[WARN] Protected tracking files modified (allowed by flag): {', '.join(hits)}")
-        return []
-    return [f"Protected tracking file modified without --allow-protected: {f}" for f in hits]
+def load_policy(root, tree):
+    path = tree / POLICY
+    # Local-only installs deliberately keep the policy out of the Git index.
+    if tree != root and not path.exists() and (root / POLICY).is_file():
+        ignored = subprocess.run(["git", "check-ignore", "-q", "--", POLICY], cwd=root)
+        if ignored.returncode == 0:
+            path = root / POLICY
+    policy = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    if not isinstance(policy, dict) or set(policy) - {"protected_paths", "forbid_new_stylesheet"}:
+        raise ValueError(f"Invalid policy keys in {POLICY}")
+    patterns = policy.get("protected_paths", [])
+    if not isinstance(patterns, list) or not all(isinstance(p, str) and p for p in patterns):
+        raise ValueError(f"Expected protected_paths to contain path patterns in {POLICY}")
+    forbid = policy.get("forbid_new_stylesheet", False)
+    if not isinstance(forbid, bool):
+        raise ValueError(f"Expected a boolean for forbid_new_stylesheet in {POLICY}")
+    return patterns, forbid
 
 
-def check_json_files(root: Path, files: list[str]) -> tuple[int, list[str]]:
-    json_files = [f for f in files if f.endswith(".json") and (root / f).is_file()]
-    errors: list[str] = []
-    for rel in json_files:
-        path = root / rel
-        try:
-            raw = path.read_text(encoding="utf-8")
-            cleaned = LEADING_BLOCK_COMMENT.sub("", raw, count=1)
-            json.loads(cleaned)
-        except Exception as exc:
-            errors.append(f"Invalid JSON in {rel}: {exc}")
-    return len(json_files), errors
+def previous_stylesheet_count(root, rel, revision):
+    blob = subprocess.run(["git", "show", revision + ":" + rel], cwd=root, capture_output=True)
+    return len(STYLESHEET.findall(blob.stdout.decode("utf-8", errors="replace"))) if blob.returncode == 0 else 0
 
 
-def run_node_tests(root: Path) -> tuple[int, list[str]]:
-    tests_dir = root / "tests"
-    if not tests_dir.is_dir():
-        return 0, []
-    test_files = sorted(
-        str(p.relative_to(root))
-        for p in tests_dir.iterdir()
-        if p.is_file() and re.search(r"\.test\.(c|m)?js$", p.name)
-    )
-    if not test_files:
-        return 0, []
-    if not shutil.which("node"):
-        return len(test_files), ["Node.js not found in PATH; skipped tests"]
-    proc = subprocess.run(
-        ["node", "--test", *test_files],
-        cwd=str(root),
-        capture_output=True,
-        text=True,
-    )
-    if proc.returncode != 0:
-        output = (proc.stdout + "\n" + proc.stderr).strip()
-        return len(test_files), [f"node --test failed (exit {proc.returncode}):\n{output}"]
-    return len(test_files), []
+def run_node_tests(tree):
+    tests = sorted(str(p.relative_to(tree)) for p in (tree / "tests").glob("*.test.*")
+                   if TEST_NAME.match(str(p.relative_to(tree))))
+    if tests:
+        subprocess.run(["node", "--test", *tests], cwd=tree, check=True)
+    return len(tests)
 
 
-def run_theme_check(root: Path, files: list[str]) -> tuple[int, list[str]]:
-    liquid_files = [f for f in files if f.endswith(".liquid") and (root / f).is_file()]
-    if not liquid_files:
-        return 0, []
-    if not shutil.which("shopify"):
-        return len(liquid_files), ["shopify CLI not found in PATH; cannot run --theme-check"]
-    proc = subprocess.run(
-        ["shopify", "theme", "check", *liquid_files],
-        cwd=str(root),
-        capture_output=True,
-        text=True,
-    )
-    if proc.returncode != 0:
-        output = (proc.stdout + "\n" + proc.stderr).strip()
-        return len(liquid_files), [f"shopify theme check failed (exit {proc.returncode}):\n{output}"]
-    return len(liquid_files), []
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("files", nargs="*", help="Explicit relative file paths to check (defaults to git changes)")
-    parser.add_argument("--staged", action="store_true", help="Only inspect staged git changes")
-    parser.add_argument("--skip-tests", action="store_true", help="Skip running tests/*.test.*")
-    parser.add_argument("--theme-check", action="store_true", help="Run targeted shopify theme check on changed .liquid files")
-    parser.add_argument("--allow-protected", action="store_true", help="Allow edits to protected tracking files (dataLayer*.liquid)")
-    parser.add_argument("--allow-stylesheet", action="store_true", help="Allow newly added {% stylesheet %} blocks in Liquid files")
-    args = parser.parse_args()
-
+def theme_diagnostics(tree):
+    cmd = ["shopify", "theme", "check", "--path", str(tree), "--output", "json", "--fail-level", "error"]
+    proc = subprocess.run(cmd, cwd=tree, capture_output=True, text=True)
+    if proc.stderr.strip():
+        print(proc.stderr.strip(), file=sys.stderr)
+    diagnostics = []
     try:
-        root = repo_root(Path.cwd())
-    except subprocess.CalledProcessError as exc:
-        print(f"[ERROR] Must run inside a Git repository: {exc}", file=sys.stderr)
-        return 1
+        reports = json.loads(proc.stdout)
+        if not isinstance(reports, list):
+            raise ValueError("expected a list of Theme Check reports")
+        for report in reports:
+            path = Path(report["path"])
+            rel = os.path.relpath(path, tree) if path.is_absolute() else str(path)
+            for item in report["offenses"]:
+                diagnostics.append((rel, item["check"], item["message"], item["severity"], item["start_row"]))
+    except (ValueError, TypeError, KeyError) as exc:
+        raise ValueError(f"Invalid Theme Check output (exit {proc.returncode}): {exc}\n{proc.stdout}") from exc
+    if proc.returncode and (proc.returncode != 1 or not any(d[3] == "error" for d in diagnostics)):
+        raise ValueError(f"Theme Check failed (exit {proc.returncode})")
+    return diagnostics
 
-    files = sorted(set(args.files)) if args.files else changed_files(root, args.staged)
-    errors: list[str] = []
 
-    errors.extend(check_protected(files, args.allow_protected))
-    json_count, json_errors = check_json_files(root, files)
-    errors.extend(json_errors)
-    stylesheet_checked, stylesheet_errors = check_stylesheet_tags(
-        root, files, args.allow_stylesheet, args.staged, bool(args.files)
-    )
-    errors.extend(stylesheet_errors)
+def baseline_errors(root, revision):
+    # Use a separate index to export the reference tree without touching the developer's checkout.
+    with tempfile.TemporaryDirectory(prefix="shopify-harness-base-") as directory:
+        tree = Path(directory).resolve() / "theme"
+        tree.mkdir()
+        env = dict(os.environ, GIT_INDEX_FILE=str(tree.parent / "index"))
+        subprocess.run(["git", "read-tree", revision], cwd=root, env=env, check=True)
+        subprocess.run(["git", "checkout-index", "--all", "--prefix=" + str(tree) + "/"],
+                       cwd=root, env=env, check=True)
+        deps = root / "node_modules"
+        if deps.is_dir() and not (tree / "node_modules").exists():
+            (tree / "node_modules").symlink_to(deps, target_is_directory=True)
+        return Counter(d[:4] for d in theme_diagnostics(tree) if d[3] == "error")
 
-    test_count = 0
-    if not args.skip_tests:
-        test_count, test_errors = run_node_tests(root)
-        errors.extend(test_errors)
 
-    liquid_checked = 0
-    if args.theme_check:
-        liquid_checked, tc_errors = run_theme_check(root, files)
-        errors.extend(tc_errors)
+def run_theme_check(root, tree, files, revision):
+    diagnostics = theme_diagnostics(tree)
+    errors = []
+    outside = []
+    for path, check, message, severity, row in diagnostics:
+        if path in files:
+            print(f"[changed] {path}:{row} [{severity}] {check} {message}")
+            if severity == "error":
+                errors.append(path)
+        elif severity == "error":
+            outside.append((path, check, message, severity, row))
 
-    print(
-        f"Checked {len(files)} file(s): "
-        f"json={json_count}, stylesheet-guard={stylesheet_checked}, tests={test_count}, theme-check-liquid={liquid_checked}"
-    )
+    # A deleted dependency may surface only on an untouched caller. Compare these errors
+    # to the same CLI on the Git baseline before filtering pre-existing findings.
+    if outside:
+        existing = Counter()
+        has_revision = subprocess.run(["git", "rev-parse", "--verify", "--quiet", revision],
+                                      cwd=root, stdout=subprocess.DEVNULL)
+        if has_revision.returncode == 0:
+            existing = baseline_errors(root, revision)
+        old_count = 0
+        for item in outside:
+            key = item[:4]
+            if existing[key] > 0:
+                existing[key] -= 1
+                old_count += 1
+                continue
+            path, check, message, severity, row = item
+            print(f"[theme] {path}:{row} [{severity}] {check} {message}")
+            errors.append(path)
+        print(f"Pre-existing errors on unchanged files: {old_count}")
     if errors:
-        for err in errors:
-            print(f"[FAIL] {err}", file=sys.stderr)
+        raise ValueError(f"Theme Check reported {len(errors)} relevant error(s)")
+
+
+def verify(root, tree, files, args):
+    patterns, forbid_stylesheet = load_policy(root, tree)
+    errors = []
+    json_count = 0
+    style_count = 0
+    for rel in sorted(files):
+        if any(fnmatchcase(rel.casefold(), pattern.casefold()) for pattern in patterns):
+            message = f"Protected path changed: {rel}"
+            if args.allow_protected:
+                print("[WARN]", message)
+            else:
+                errors.append(message)
+        path = tree / rel
+        if not path.is_file():
+            continue
+        if rel.endswith(".json"):
+            json_count += 1
+            parse = theme_json.loads if rel.startswith(JSONC_DIRS) else theme_json.strict_loads
+            try:
+                parse(path.read_text(encoding="utf-8"))
+            except ValueError as exc:
+                errors.append(f"Invalid JSON in {rel}: {exc}")
+        if forbid_stylesheet and rel.endswith(".liquid") and rel.startswith(STYLESHEET_DIRS):
+            style_count += 1
+            tags = STYLESHEET.findall(path.read_text(encoding="utf-8"))
+            if tags and len(tags) > previous_stylesheet_count(root, rel, args.base or "HEAD"):
+                message = f"Theme policy forbids new stylesheet tags: {rel}"
+                if args.allow_stylesheet:
+                    print("[WARN]", message)
+                else:
+                    errors.append(message)
+    for message in errors:
+        print("[FAIL]", message, file=sys.stderr)
+    tests = 0 if args.skip_tests else run_node_tests(tree)
+    lint = args.theme_check and any(f.startswith(THEME_DIRS) or f == ".theme-check.yml" for f in files)
+    if lint:
+        run_theme_check(root, tree, files, args.base or "HEAD")
+    print(f"Checked {len(files)} file(s): json={json_count}, stylesheet-guard={style_count}, "
+          f"tests={tests}, theme-check={'full theme' if lint else 'skipped'}")
+    if errors:
         return 1
     print("[PASS] All checks passed.")
     return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("files", nargs="*", help="Repository-relative paths (defaults to Git changes)")
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument("--base", metavar="REV", help="Check the working tree against its merge base with REV (for PR checkouts)")
+    scope.add_argument("--staged", action="store_true", help="Check the Git index, including staged test and theme files")
+    parser.add_argument("--skip-tests", action="store_true", help="Skip tests/*.test.{js,cjs,mjs}")
+    parser.add_argument("--theme-check", action="store_true", help="Lint the complete theme for affected theme paths")
+    parser.add_argument("--allow-protected", action="store_true", help="Allow authorized changes to protected paths")
+    parser.add_argument("--allow-stylesheet", action="store_true", help="Override the theme's stylesheet policy")
+    args = parser.parse_args()
+    try:
+        root = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip()).resolve()
+        if args.base:
+            if args.base.startswith("-"):
+                parser.error("expected a Git revision for --base")
+            args.base = subprocess.check_output(["git", "merge-base", args.base, "HEAD"], cwd=root, text=True).strip()
+        files = {Path(f).as_posix() for f in args.files} if args.files else changed_files(root, args.staged, args.base)
+        if any(Path(f).is_absolute() or ".." in Path(f).parts or ".git" in Path(f).parts for f in files):
+            parser.error("expected paths within the repository")
+        with check_tree(root, files, args) as tree:
+            return verify(root, tree, files, args)
+    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+        print(f"[FAIL] {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
