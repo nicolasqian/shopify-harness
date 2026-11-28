@@ -15,6 +15,6 @@
 ## 工具与验收
 
 - 主题变更后在主题根目录运行 `python3 .agents/scripts/verify-changes.py`。提交前检查支持 `--staged`，Liquid 及跨文件依赖检查使用 `--theme-check`。并运行团队针对受影响功能维护的测试。
-- [组件迁移](skills/section-port/SKILL.md)用于跨主题搬运指定实例及依赖。[性能优化](skills/shopify-performance/SKILL.md)用于分析或优化目标页面。需要提交说明时使用[提交信息技能](skills/shopify-commit-message/SKILL.md)。
+- [组件迁移](skills/section-port/SKILL.md)用于跨主题搬运指定实例及依赖。[性能优化](skills/shopify-performance/SKILL.md)用于分析或优化目标页面。[页面验收](skills/shopify-page-review/SKILL.md)用于验证已确认的页面样式或功能。需要提交说明时使用[提交信息技能](skills/shopify-commit-message/SKILL.md)。
 - 性能分析优先复用已有 trace 和源码。新采样按当前任务要求进行，分别说明减少的直接开销和已证实的用户收益。
 - 报告改动、检查结果与尚待验证的行为。用户已将预览验收延至发布后时，记录待验项并继续本地验证。

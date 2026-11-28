@@ -1,6 +1,6 @@
 # Shopify Harness
 
-这套工具帮助开发者和编码代理维护 Shopify 主题。它能按模板中的实例定位 section，指导跨主题迁移和性能分析，并校验 Git 变更。可在本地完成安装和检查。运行环境为 macOS 或 Linux、Git 和 Python 3.7+。主题包含 Node 测试时需要支持 `node --test` 的 Node.js，运行 Theme Check 时需要安装 Shopify CLI。
+这套工具帮助开发者和编码代理维护 Shopify 主题。它能按模板中的实例定位 section，指导跨主题迁移、页面验收和性能分析，并校验 Git 变更。可在本地完成安装和检查。运行环境为 macOS 或 Linux、Git 和 Python 3.7+。主题包含 Node 测试时需要支持 `node --test` 的 Node.js，运行 Theme Check 时需要安装 Shopify CLI。
 
 ## 给现有主题接入通用版
 
@@ -17,11 +17,11 @@
    处理 Shopify 主题任务时，先读取仓库根目录的 .agents/shopify-harness.md，并遵循本主题的具体约定。
    ```
 
-2. 使用 Claude Code 的团队，在主题的 `CLAUDE.md` 中加入 `@AGENTS.md`。要让三个技能出现在 Claude Code 的项目技能目录中，在主题根目录执行一次以下命令。逐个创建链接可以保留团队已有的其他技能；遇到同名技能时先比较两份内容。
+2. 使用 Claude Code 的团队，在主题的 `CLAUDE.md` 中加入 `@AGENTS.md`。要让这些技能出现在 Claude Code 的项目技能目录中，在主题根目录执行一次以下命令。逐个创建链接可以保留团队已有的其他技能；遇到同名技能时先比较两份内容。
 
    ```sh
    mkdir -p .claude/skills
-   for skill in section-port shopify-performance shopify-commit-message; do
+   for skill in section-port shopify-performance shopify-commit-message shopify-page-review; do
      entry=".claude/skills/$skill"
      if [ -e "$entry" ] || [ -L "$entry" ]; then
        printf '保留已有路径 %s\n' "$entry"

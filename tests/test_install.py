@@ -12,7 +12,7 @@ LOCK = ".agents/shopify-harness.lock.json"
 LOCAL_LOCK = ".tmp/shopify-harness-sync.json"
 POLICY = ".agents/shopify-harness-policy.json"
 EXTRACT = ".agents/skills/section-port/scripts/extract_section.py"
-SKILLS = ("section-port", "shopify-commit-message", "shopify-performance")
+SKILLS = ("section-port", "shopify-commit-message", "shopify-page-review", "shopify-performance")
 
 
 class InstallTests(ThemeRepo):

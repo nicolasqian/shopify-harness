@@ -4,5 +4,6 @@
 .agents/skills/section-port/SKILL.md
 .agents/skills/section-port/scripts/extract_section.py
 .agents/skills/shopify-commit-message/SKILL.md
+.agents/skills/shopify-page-review/SKILL.md
 .agents/skills/shopify-performance/SKILL.md
 .agents/skills/shopify-performance/references/measurement.md
